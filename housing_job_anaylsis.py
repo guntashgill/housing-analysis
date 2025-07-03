@@ -6,11 +6,11 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.arima.model import ARIMA
 from tqdm import tqdm
 import zipfile
 import shutil
+import time
 
 # Set professional style
 sns.set(style="whitegrid", palette="muted", font_scale=1.2)
@@ -28,15 +28,6 @@ class KaggleDataLoader:
             print(f"Downloading dataset: {handle}")
             path = kagglehub.dataset_download(handle)
             print(f"Dataset downloaded to: {path}")
-            
-            # Extract if zip file
-            if path.endswith('.zip'):
-                extract_path = path.replace('.zip', '')
-                with zipfile.ZipFile(path, 'r') as zip_ref:
-                    zip_ref.extractall(extract_path)
-                print(f"Files extracted to: {extract_path}")
-                return extract_path
-            
             return path
         except Exception as e:
             print(f"Error downloading dataset: {str(e)}")
@@ -85,22 +76,31 @@ class DataLoader:
             )
             if meta_path:
                 meta = pd.read_csv(meta_path)
+                # Merge with main dataset
                 df = df.merge(meta[['CountyRegionID', 'CountyName', 'StateName']], 
                               on='CountyRegionID', how='left')
             
             # Convert to datetime
             df['Date'] = pd.to_datetime(df['Date'])
             
-            # Pivot to wide format (features as columns)
-            pivot_df = df.pivot_table(index=['CountyRegionID', 'CountyName', 'StateName', 'Date'], 
-                                     columns='IndicatorName', values='Value').reset_index()
+            # Check for required columns
+            required_columns = ['MedianListingPrice', 'MedianSquareFeet', 'MedianRentalPrice']
+            for col in required_columns:
+                if col not in df.columns:
+                    # Try to find similar columns
+                    matching_cols = [c for c in df.columns if col.lower() in c.lower()]
+                    if matching_cols:
+                        df.rename(columns={matching_cols[0]: col}, inplace=True)
+                    else:
+                        print(f"Column {col} not found, using placeholder values")
+                        df[col] = np.nan
             
             # Feature engineering
-            pivot_df['PricePerSqft'] = pivot_df['MedianListingPrice'] / pivot_df['MedianSquareFeet']
-            pivot_df['RentRatio'] = pivot_df['MedianRentalPrice'] / pivot_df['MedianListingPrice']
-            pivot_df['AnnualAppreciation'] = pivot_df.groupby('CountyRegionID')['MedianListingPrice'].pct_change() * 12
+            df['PricePerSqft'] = df['MedianListingPrice'] / df['MedianSquareFeet']
+            df['RentRatio'] = df['MedianRentalPrice'] / df['MedianListingPrice']
+            df['AnnualAppreciation'] = df.groupby('CountyRegionID')['MedianListingPrice'].pct_change() * 12
             
-            return pivot_df.dropna(subset=['MedianListingPrice'])
+            return df.dropna(subset=['MedianListingPrice'])
         except Exception as e:
             print(f"Error loading housing data: {str(e)}")
             print("Using generated housing data")
@@ -109,9 +109,39 @@ class DataLoader:
     @staticmethod
     def generate_housing_data():
         """Generate realistic housing data for demonstration"""
-        # (Same implementation as before)
-        # [Content unchanged from previous implementation]
-        pass
+        counties = ['Santa Clara', 'San Mateo', 'Alameda', 'Contra Costa', 'San Francisco']
+        states = ['CA'] * 5
+        dates = pd.date_range('2010-01-01', '2023-01-01', freq='MS')
+        
+        data = []
+        for i, county in enumerate(counties):
+            base_price = np.random.uniform(300000, 800000)
+            for date in dates:
+                # Appreciation model
+                years = (date - pd.Timestamp('2010-01-01')).days / 365
+                appreciation = 0.05 * years + 0.02 * np.sin(years)
+                price = base_price * (1 + appreciation) * np.random.uniform(0.98, 1.02)
+                
+                # Related metrics
+                sqft = np.random.uniform(1200, 2500)
+                rent = price * 0.0045 * np.random.uniform(0.9, 1.1)
+                
+                data.append({
+                    'CountyRegionID': i+1,
+                    'CountyName': county,
+                    'StateName': states[i],
+                    'Date': date,
+                    'MedianListingPrice': price,
+                    'MedianSquareFeet': sqft,
+                    'MedianRentalPrice': rent,
+                    'ActiveListingCount': np.random.randint(50, 500)
+                })
+        
+        df = pd.DataFrame(data)
+        df['PricePerSqft'] = df['MedianListingPrice'] / df['MedianSquareFeet']
+        df['RentRatio'] = df['MedianRentalPrice'] / df['MedianListingPrice']
+        df['AnnualAppreciation'] = df.groupby('CountyRegionID')['MedianListingPrice'].pct_change() * 12
+        return df.dropna()
 
     @staticmethod
     def load_job_data():
@@ -126,31 +156,91 @@ class DataLoader:
             if not file_path:
                 raise FileNotFoundError("Job data not available")
             
-            df = pd.read_csv(file_path)
+            # Try different encodings if necessary
+            try:
+                df = pd.read_csv(file_path, encoding='utf-8')
+            except:
+                df = pd.read_csv(file_path, encoding='latin1')
+            
+            # Create consistent column names
+            col_map = {}
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'title' in col_lower:
+                    col_map[col] = 'job_title'
+                elif 'company' in col_lower:
+                    col_map[col] = 'company'
+                elif 'location' in col_lower:
+                    col_map[col] = 'location'
+                elif 'description' in col_lower:
+                    col_map[col] = 'job_description'
+                elif 'experience' in col_lower:
+                    col_map[col] = 'job_experience'
+            
+            df = df.rename(columns=col_map)
+            
+            # Ensure we have required columns
+            required_columns = ['job_title', 'company', 'location', 'job_description', 'job_experience']
+            for col in required_columns:
+                if col not in df.columns:
+                    print(f"Column {col} not found, creating placeholder")
+                    df[col] = np.nan
             
             # Clean and transform
-            df = df[['job_title', 'company', 'location', 'job_description', 'job_experience']]
+            df = df[required_columns]
             df = df.dropna(subset=['location', 'job_experience'])
             
             # Extract state and city
-            df['State'] = df['location'].apply(lambda x: x.split(',')[-1].strip() if isinstance(x, str) else '')
-            df['City'] = df['location'].apply(lambda x: x.split(',')[0].strip() if isinstance(x, str) else '')
+            df['State'] = df['location'].apply(
+                lambda x: x.split(',')[-1].strip() if isinstance(x, str) and ',' in x else 'Unknown'
+            )
+            df['City'] = df['location'].apply(
+                lambda x: x.split(',')[0].strip() if isinstance(x, str) and ',' in x else 'Unknown'
+            )
             
             # Extract salary information
             def extract_salary(desc):
                 if pd.isna(desc) or not isinstance(desc, str):
                     return np.nan
                 if '$' in desc:
-                    nums = [int(s.replace(',', '')) for s in desc.split() if s.replace(',', '').isdigit()]
+                    # Find all numbers with dollar signs
+                    nums = []
+                    for word in desc.split():
+                        clean_word = word.replace(',', '').replace('$', '')
+                        if clean_word.replace('.', '').isdigit():
+                            nums.append(float(clean_word))
                     if nums:
                         return np.mean(nums)
                 return np.nan
             
             df['Salary'] = df['job_description'].apply(extract_salary)
-            df = df.dropna(subset=['Salary'])
+            
+            # If no salaries found, use industry averages
+            if df['Salary'].isna().all():
+                print("No salaries extracted, using industry averages")
+                industry_salaries = {
+                    'Technology': 120000,
+                    'Healthcare': 90000,
+                    'Finance': 110000,
+                    'Education': 70000,
+                    'Manufacturing': 80000
+                }
+                # Add industry classification
+                industries = list(industry_salaries.keys())
+                df['Industry'] = np.random.choice(industries, size=len(df))
+                df['Salary'] = df['Industry'].map(industry_salaries)
+            else:
+                # Add industry classification
+                industries = ['Technology', 'Healthcare', 'Finance', 'Education', 'Manufacturing']
+                df['Industry'] = np.random.choice(industries, size=len(df))
+                # Fill missing salaries with industry averages
+                industry_avg = df.groupby('Industry')['Salary'].transform('mean')
+                df['Salary'] = df['Salary'].fillna(industry_avg)
             
             # Categorize experience
             def map_experience(exp):
+                if pd.isna(exp):
+                    return 'Not Specified'
                 exp = str(exp).lower()
                 if 'entry' in exp or 'junior' in exp or '0-2' in exp:
                     return 'Entry-level'
@@ -163,10 +253,6 @@ class DataLoader:
             df['Experience'] = df['job_experience'].apply(map_experience)
             df = df[df['Experience'] != 'Not Specified']
             
-            # Add industry classification
-            industries = ['Technology', 'Healthcare', 'Finance', 'Education', 'Manufacturing']
-            df['Industry'] = np.random.choice(industries, size=len(df))
-            
             return df
         except Exception as e:
             print(f"Error loading job data: {str(e)}")
@@ -176,9 +262,45 @@ class DataLoader:
     @staticmethod
     def generate_job_data():
         """Generate realistic job data for demonstration"""
-        # (Same implementation as before)
-        # [Content unchanged from previous implementation]
-        pass
+        cities = ['San Jose', 'Palo Alto', 'Mountain View', 'Sunnyvale', 'San Francisco']
+        states = ['CA'] * 5
+        titles = ['Software Engineer', 'Data Scientist', 'Product Manager', 
+                 'UX Designer', 'DevOps Engineer', 'Marketing Specialist']
+        companies = ['TechCorp', 'DataSystems', 'InnovateCo', 'FutureTech', 'DigitalSolutions']
+        
+        data = []
+        for _ in range(5000):
+            city = np.random.choice(cities)
+            state = 'CA'
+            title = np.random.choice(titles)
+            company = np.random.choice(companies)
+            exp_level = np.random.choice(['Entry-level', 'Mid-level', 'Senior'], p=[0.3, 0.5, 0.2])
+            industry = np.random.choice(['Technology', 'Healthcare', 'Finance', 'Education', 'Manufacturing'])
+            
+            # Base salaries
+            base_salaries = {
+                'Software Engineer': {'Entry-level': 90000, 'Mid-level': 130000, 'Senior': 180000},
+                'Data Scientist': {'Entry-level': 95000, 'Mid-level': 135000, 'Senior': 190000},
+                'Product Manager': {'Entry-level': 85000, 'Mid-level': 125000, 'Senior': 170000},
+                'UX Designer': {'Entry-level': 80000, 'Mid-level': 110000, 'Senior': 150000},
+                'DevOps Engineer': {'Entry-level': 100000, 'Mid-level': 140000, 'Senior': 190000},
+                'Marketing Specialist': {'Entry-level': 60000, 'Mid-level': 85000, 'Senior': 120000}
+            }
+            
+            salary = base_salaries[title][exp_level] * np.random.uniform(0.9, 1.15)
+            
+            data.append({
+                'job_title': f"{exp_level} {title}",
+                'company': company,
+                'location': f"{city}, {state}",
+                'Salary': salary,
+                'Experience': exp_level,
+                'Industry': industry,
+                'City': city,
+                'State': state
+            })
+        
+        return pd.DataFrame(data)
 
 # ======================
 # PREDICTIVE MODELING
@@ -188,7 +310,6 @@ class PredictiveModels:
     def __init__(self, housing_df, job_df):
         self.housing_df = housing_df
         self.job_df = job_df
-        self.scaler = StandardScaler()
         
     def train_housing_models(self):
         """Train models to predict future housing prices"""
@@ -201,17 +322,23 @@ class PredictiveModels:
                                     desc="Training housing models"):
             # Time series model for price prediction
             price_data = group.set_index('Date')['MedianListingPrice']
-            model = ARIMA(price_data, order=(2,1,2))
-            model_fit = model.fit()
-            county_models[county_id] = model_fit
+            try:
+                # Use a simpler model for stability
+                model = ARIMA(price_data, order=(1,1,0))
+                model_fit = model.fit()
+                county_models[county_id] = model_fit
+            except:
+                # Fallback to simple average if ARIMA fails
+                county_models[county_id] = None
             
             # Appreciation rate model
-            X = group[['MedianSquareFeet', 'MedianRentalPrice', 'ActiveListingCount']]
+            features = ['MedianSquareFeet', 'MedianRentalPrice', 'ActiveListingCount']
+            X = group[features].fillna(group[features].mean())
             y = group['AnnualAppreciation'].fillna(0)
             
             if len(X) > 10:
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                rf = RandomForestRegressor(n_estimators=100, random_state=42)
+                rf = RandomForestRegressor(n_estimators=50, random_state=42, max_depth=5)
                 rf.fit(X_train, y_train)
                 appreciation_models[county_id] = rf
         
@@ -259,13 +386,13 @@ class PredictiveModels:
             y = group['avg_salary']
             
             if len(X) > 3:
-                rf_salary = RandomForestRegressor(n_estimators=50, random_state=42)
+                rf_salary = RandomForestRegressor(n_estimators=50, random_state=42, max_depth=3)
                 rf_salary.fit(X, y)
                 salary_models[(exp, industry)] = rf_salary
             
             # Job count model
             y_count = group['job_count']
-            rf_count = RandomForestRegressor(n_estimators=50, random_state=42)
+            rf_count = RandomForestRegressor(n_estimators=50, random_state=42, max_depth=3)
             rf_count.fit(X, y_count)
             job_count_models[(exp, industry)] = rf_count
         
@@ -275,17 +402,28 @@ class PredictiveModels:
         """Predict housing prices for a future date"""
         model = self.county_models.get(county_id)
         if not model:
+            # Fallback to simple growth model
+            county_data = self.housing_df[self.housing_df['CountyRegionID'] == county_id]
+            if len(county_data) > 1:
+                growth_rate = county_data['AnnualAppreciation'].mean()
+                current_price = county_data['MedianListingPrice'].iloc[-1]
+                months = (future_date - county_data['Date'].max()).days // 30
+                return current_price * (1 + growth_rate/12)**months, growth_rate
             return None, None
         
         # Predict price
-        forecast = model.get_forecast(steps=(future_date - self.housing_df['Date'].max()).days // 30)
-        pred_price = forecast.predicted_mean.iloc[-1]
+        try:
+            forecast = model.get_forecast(steps=(future_date - self.housing_df['Date'].max()).days // 30)
+            pred_price = forecast.predicted_mean.iloc[-1]
+        except:
+            # Fallback if forecast fails
+            pred_price = self.housing_df[self.housing_df['CountyRegionID'] == county_id]['MedianListingPrice'].mean()
         
         # Predict appreciation rate
         rf_model = self.appreciation_models.get(county_id)
         if rf_model:
             latest = self.housing_df[self.housing_df['CountyRegionID'] == county_id].iloc[-1]
-            features = latest[['MedianSquareFeet', 'MedianRentalPrice', 'ActiveListingCount']].values.reshape(1, -1)
+            features = latest[['MedianSquareFeet', 'MedianRentalPrice', 'ActiveListingCount']].fillna(0).values.reshape(1, -1)
             appreciation_rate = rf_model.predict(features)[0]
             return pred_price, appreciation_rate
         
@@ -482,19 +620,55 @@ class Visualizer:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12))
         
         # Housing price trends
-        housing_agg = housing_df.groupby(['Date', 'CountyName'])['MedianListingPrice'].mean().unstack()
-        housing_agg.plot(ax=ax1, lw=2)
-        ax1.set_title('Historical Housing Price Trends by County', fontsize=16)
-        ax1.set_ylabel('Median Listing Price ($)')
-        ax1.legend(title='County')
-        ax1.grid(True, linestyle='--', alpha=0.7)
+        if housing_df is not None and not housing_df.empty:
+            try:
+                if 'Date' in housing_df and 'CountyName' in housing_df and 'MedianListingPrice' in housing_df:
+                    housing_agg = housing_df.groupby(['Date', 'CountyName'])['MedianListingPrice'].mean().unstack()
+                    housing_agg.plot(ax=ax1, lw=2)
+                    ax1.set_title('Historical Housing Price Trends by County', fontsize=16)
+                    ax1.set_ylabel('Median Listing Price ($)')
+                    ax1.legend(title='County')
+                    ax1.grid(True, linestyle='--', alpha=0.7)
+                else:
+                    ax1.text(0.5, 0.5, 'Missing housing data columns', 
+                             ha='center', va='center', transform=ax1.transAxes)
+            except Exception as e:
+                print(f"Error plotting housing trends: {e}")
+                ax1.text(0.5, 0.5, 'Error plotting housing trends', 
+                         ha='center', va='center', transform=ax1.transAxes)
+        else:
+            ax1.text(0.5, 0.5, 'No housing data available', 
+                     ha='center', va='center', transform=ax1.transAxes)
         
         # Job market trends
-        job_agg = job_df.groupby(['Experience', 'Industry'])['Salary'].mean().unstack()
-        job_agg.T.plot(kind='bar', ax=ax2, rot=0)
-        ax2.set_title('Average Salaries by Experience Level and Industry', fontsize=16)
-        ax2.set_ylabel('Salary ($)')
-        ax2.grid(axis='y', linestyle='--', alpha=0.7)
+        if job_df is not None and not job_df.empty:
+            try:
+                if 'Experience' in job_df and 'Industry' in job_df and 'Salary' in job_df:
+                    # Ensure Salary is numeric
+                    job_df['Salary'] = pd.to_numeric(job_df['Salary'], errors='coerce')
+                    if job_df['Salary'].isna().all():
+                        raise ValueError("Salary data is not numeric")
+                    
+                    job_agg = job_df.groupby(['Experience', 'Industry'])['Salary'].mean().unstack()
+                    
+                    if not job_agg.empty:
+                        job_agg.T.plot(kind='bar', ax=ax2, rot=0)
+                        ax2.set_title('Average Salaries by Experience Level and Industry', fontsize=16)
+                        ax2.set_ylabel('Salary ($)')
+                        ax2.grid(axis='y', linestyle='--', alpha=0.7)
+                    else:
+                        ax2.text(0.5, 0.5, 'No job data to visualize', 
+                                 ha='center', va='center', transform=ax2.transAxes)
+                else:
+                    ax2.text(0.5, 0.5, 'Missing job data columns', 
+                             ha='center', va='center', transform=ax2.transAxes)
+            except Exception as e:
+                print(f"Error plotting job trends: {e}")
+                ax2.text(0.5, 0.5, 'Error plotting job trends', 
+                         ha='center', va='center', transform=ax2.transAxes)
+        else:
+            ax2.text(0.5, 0.5, 'No job data available', 
+                     ha='center', va='center', transform=ax2.transAxes)
         
         plt.tight_layout()
         plt.savefig('historical_trends.png', dpi=300)
